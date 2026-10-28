@@ -55,6 +55,11 @@ jobs:
           JS
       - name: Install distributable with package scripts disabled
         run: npm install --prefix candidate --ignore-scripts --no-audit --no-fund --no-package-lock ./candidate.tgz
+      - name: Install exact native host for metadata readback
+        if: matrix.node == 24
+        run: npm install --global --ignore-scripts --no-audit --no-fund @openai/codex@0.163.0-alpha.11.2
       - name: Native security, real profile IO, lifecycle and runtime preparation
         shell: bash
+        env:
+          NATIVE_CODEX_CHECK: ${{ matrix.node == 24 && '1' || '0' }}
         run: node checks/client-checks.mjs candidate/node_modules/totemlayer "$CANDIDATE_VERSION"

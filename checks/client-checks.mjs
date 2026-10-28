@@ -180,6 +180,64 @@ try {
     );
     assert.equal(createHash("sha256").update(binary).digest("hex"), native.binarySha256);
   });
+  if (process.env.NATIVE_CODEX_CHECK === "1") {
+    await check("native Codex current session and selected model readback", async () => {
+      const f = await fixture();
+      const environment = {
+        ...process.env,
+        CODEX_HOME: join(f.path, "codex"),
+        TOTEM_CONFIG_DIR: join(f.path, "totem"),
+      };
+      for (const key of [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "TOTEM_NETWORK_API_KEY",
+        "TOTEM_NETWORK_API_KEY_FILE",
+        "CODEX_THREAD_ID",
+      ])
+        delete environment[key];
+      await mkdir(environment.CODEX_HOME, { mode: 0o700 });
+      const config = join(environment.CODEX_HOME, "config.toml");
+      await writeFile(config, 'model = "preserved-native-fixture-model"\n', { mode: 0o600 });
+      const { connectCodexHarness } = await load("harness-bootstrap.mjs");
+      const { createStrictCodexAdapter } = await load("strict-codex-adapter.mjs");
+      let rpc = connectCodexHarness(environment),
+        adapter;
+      try {
+        await rpc.initialize();
+        const created = await rpc.request("thread/start", { cwd: f.path });
+        assert.equal(created.model, "preserved-native-fixture-model");
+        await rpc.request("thread/inject_items", {
+          threadId: created.thread.id,
+          items: [
+            {
+              type: "message",
+              role: "user",
+              content: [
+                { type: "input_text", text: "Disposable release metadata fixture; no model turn." },
+              ],
+            },
+          ],
+        });
+        await rpc.close();
+        rpc = undefined;
+        await writeFile(config, 'model = "different-default-fixture-model"\n', { mode: 0o600 });
+        adapter = createStrictCodexAdapter(
+          { baseUrl: "https://totemlayer.com", sessionId: created.thread.id, waitSeconds: 0 },
+          { env: environment, write() {} },
+        );
+        const inspected = await adapter.inspect();
+        assert.equal(inspected.host.model, created.model);
+        assert.equal(inspected.host.sessionId, created.thread.id);
+        assert.equal(inspected.host.modelVerified, true);
+        assert.equal(inspected.connection, undefined);
+        assert.match(inspected.host.policyDigest, /^[a-f0-9]{64}$/);
+      } finally {
+        await adapter?.close();
+        await rpc?.close();
+      }
+    });
+  }
   console.log(
     JSON.stringify({
       platform: process.platform,
