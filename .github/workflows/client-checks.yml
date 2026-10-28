@@ -1,0 +1,60 @@
+name: Public CLI native checks
+on:
+  workflow_dispatch:
+    inputs:
+      archive_url:
+        required: true
+        type: string
+      sha256:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      source_commit:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  client:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        node: [22, 24, 26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      CANDIDATE_URL: ${{ inputs.archive_url }}
+      CANDIDATE_SHA256: ${{ inputs.sha256 }}
+      CANDIDATE_VERSION: ${{ inputs.version }}
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Fetch exact public candidate and verify integrity
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {createHash} from 'node:crypto';
+          import {writeFile} from 'node:fs/promises';
+          assert.match(process.env.CANDIDATE_URL,/^https:\/\/github\.com\/linbrandon4\/totem-releases\/releases\/download\/cli-candidate-[\w.-]+\/totemlayer-[\d.]+\.tgz$/);
+          assert.match(process.env.CANDIDATE_SHA256,/^[a-f0-9]{64}$/);
+          assert.match(process.env.SOURCE_COMMIT,/^[a-f0-9]{40}$/);
+          const r=await fetch(process.env.CANDIDATE_URL);assert.equal(r.status,200);
+          const b=Buffer.from(await r.arrayBuffer());assert(b.length<2000000);
+          assert.equal(createHash('sha256').update(b).digest('hex'),process.env.CANDIDATE_SHA256);
+          await writeFile('candidate.tgz',b);
+          console.log(JSON.stringify({sourceCommit:process.env.SOURCE_COMMIT,sha256:process.env.CANDIDATE_SHA256,bytes:b.length}));
+          JS
+      - name: Install distributable with package scripts disabled
+        run: npm install --prefix candidate --ignore-scripts --no-audit --no-fund --no-package-lock ./candidate.tgz
+      - name: Native security, real profile IO, lifecycle and runtime preparation
+        shell: bash
+        run: node checks/client-checks.mjs candidate/node_modules/totemlayer "$CANDIDATE_VERSION"
