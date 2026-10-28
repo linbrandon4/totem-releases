@@ -66,6 +66,15 @@ try {
     assert.equal(output.trim(), version);
     assert.deepEqual(Object.keys(pkg.bin).sort(), ["agenttrust", "totem", "totemlayer"]);
   });
+  await check("bundled complete guide pins the exact tested client", async () => {
+    const { readReleaseSetupGuide } = await load("setup-guide.mjs");
+    const primary = await readReleaseSetupGuide();
+    const alternate = await readReleaseSetupGuide("alternate");
+    assert.equal(primary.integrityVerified, true);
+    assert.equal(primary.sha256, alternate.sha256);
+    assert(primary.text.includes(`release **${version}**`));
+    assert(primary.text.includes(`totemlayer-${version}.tgz`));
+  });
   await check("private owned key and directory remain usable", async () => {
     const f = await fixture();
     await assertWindowsPrivatePath(f.key);
