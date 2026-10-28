@@ -14,6 +14,12 @@ on:
       source_commit:
         required: true
         type: string
+      runtime_archive_url:
+        required: false
+        type: string
+      runtime_manifest_url:
+        required: false
+        type: string
 permissions:
   contents: read
 jobs:
@@ -30,6 +36,8 @@ jobs:
       CANDIDATE_SHA256: ${{ inputs.sha256 }}
       CANDIDATE_VERSION: ${{ inputs.version }}
       SOURCE_COMMIT: ${{ inputs.source_commit }}
+      RUNTIME_ARCHIVE_URL: ${{ inputs.runtime_archive_url }}
+      RUNTIME_MANIFEST_URL: ${{ inputs.runtime_manifest_url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

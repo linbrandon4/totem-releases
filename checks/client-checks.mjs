@@ -190,6 +190,53 @@ try {
     assert.equal(createHash("sha256").update(binary).digest("hex"), native.binarySha256);
   });
   if (process.env.NATIVE_CODEX_CHECK === "1") {
+    if (process.env.RUNTIME_ARCHIVE_URL && process.env.RUNTIME_MANIFEST_URL) {
+      await check(
+        "exact signed update extracts and protects state on the native platform",
+        async () => {
+          const f = await fixture();
+          const { verifyUpdateManifest } = await load("runtime-update.mjs");
+          const { extractRuntimeArchive } = await load("runtime-archive.mjs");
+          for (const url of [process.env.RUNTIME_ARCHIVE_URL, process.env.RUNTIME_MANIFEST_URL])
+            assert.match(
+              url,
+              /^https:\/\/github\.com\/linbrandon4\/totem-releases\/releases\/download\/cli-candidate-[\w.-]+\/[\w.-]+$/,
+            );
+          const response = await fetch(process.env.RUNTIME_MANIFEST_URL);
+          assert.equal(response.status, 200);
+          const manifest = verifyUpdateManifest(await response.json());
+          assert.equal(manifest.version, version);
+          assert.equal(manifest.sourceCommit, process.env.SOURCE_COMMIT);
+          const download = await fetch(process.env.RUNTIME_ARCHIVE_URL);
+          assert.equal(download.status, 200);
+          const bytes = Buffer.from(await download.arrayBuffer());
+          assert.equal(bytes.length, manifest.archive.size);
+          assert.equal(createHash("sha256").update(bytes).digest("hex"), manifest.archive.sha256);
+          await extractRuntimeArchive(bytes, f.path);
+          const installed = join(f.path, "node_modules/totemlayer");
+          for (const name of [
+            "windows-private-path.mjs",
+            "strict-codex-adapter.mjs",
+            "setup-assets/manifest.json",
+          ])
+            assert.deepEqual(
+              await readFile(join(installed, "bin", name)),
+              await readFile(join(packagePath, "bin", name)),
+            );
+          execFileSync(process.execPath, [join(installed, "bin/update-health.mjs")], {
+            encoding: "utf8",
+            timeout: 30000,
+            env: { ...process.env, TOTEM_CONFIG_DIR: f.path, TOTEM_AUTO_START: "0", CI: "1" },
+          });
+          const archived = await import(
+            pathToFileURL(join(installed, "bin/runtime-installation.mjs"))
+          );
+          const state = join(f.path, "verified-state.json");
+          await archived.privateWrite(state, { synthetic: true });
+          assert.deepEqual(await archived.privateRead(state), { synthetic: true });
+        },
+      );
+    }
     await check("native Codex current session and selected model readback", async () => {
       const f = await fixture();
       const environment = {
