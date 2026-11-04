@@ -1,0 +1,52 @@
+name: Approve exact Totem desktop release
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact private Totem source commit
+        required: true
+        type: string
+      version:
+        description: Desktop version already built and verified
+        required: true
+        type: string
+      manifest_sha256:
+        description: SHA256 of the verified latest.json manifest
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  approval:
+    if: github.repository == 'linbrandon4/totem-releases' && github.actor == 'linbrandon4' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: release-approval
+    steps:
+      - name: Record owner approval of exact source and artifacts
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {writeFile} from 'node:fs/promises';
+          assert.match(process.env.SOURCE_COMMIT,/^[a-f0-9]{40}$/);
+          assert.match(process.env.MANIFEST_SHA256,/^[a-f0-9]{64}$/);
+          assert.match(process.env.RELEASE_VERSION,/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+          await writeFile('release-approval.json',JSON.stringify({
+            sourceCommit:process.env.SOURCE_COMMIT,
+            version:process.env.RELEASE_VERSION,
+            manifestSha256:process.env.MANIFEST_SHA256,
+            runId:process.env.GITHUB_RUN_ID,
+            workflowCommit:process.env.GITHUB_SHA,
+            repository:process.env.GITHUB_REPOSITORY,
+          },null,2)+'\n');
+          JS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-approval
+          path: release-approval.json
+          if-no-files-found: error
+          retention-days: 14
