@@ -1,4 +1,4 @@
-name: Approve exact Totem desktop release
+name: Verify and approve exact Totem desktop release
 on:
   workflow_dispatch:
     inputs:
@@ -7,46 +7,150 @@ on:
         required: true
         type: string
       version:
-        description: Desktop version already built and verified
+        description: Published desktop version to verify (e.g. 0.9.31)
         required: true
         type: string
       manifest_sha256:
         description: SHA256 of the verified latest.json manifest
         required: true
         type: string
+      distribution:
+        description: Preview artifacts may be approved as previews; trusted requires Developer ID, notarization and Authenticode
+        required: true
+        type: choice
+        default: preview
+        options:
+          - preview
+          - trusted
+  schedule:
+    - cron: "17 6 * * *"
 permissions:
   contents: read
+concurrency:
+  group: desktop-release-approval
+  cancel-in-progress: false
 jobs:
-  approval:
-    if: github.repository == 'linbrandon4/totem-releases' && github.actor == 'linbrandon4' && github.ref == 'refs/heads/main'
+  audit:
+    if: github.repository == 'linbrandon4/totem-releases' && (github.event_name == 'schedule' || github.actor == 'linbrandon4')
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: "24"
+      - name: Verify the feed the updater actually resolves
+        run: |
+          node --input-type=module <<'JS'
+          import assert from "node:assert/strict";
+          import {spawnSync} from "node:child_process";
+          const alias = "https://github.com/linbrandon4/totem-releases/releases/latest/download/latest.json";
+          const manifest = await fetch(alias).then((response) => response.json());
+          assert.match(manifest.version, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+          const run = spawnSync(process.execPath, [
+            "checks/desktop-release-checks.mjs",
+            "--tag", `v${manifest.version}`,
+            "--report", "feed-audit-report.json",
+          ], {encoding: "utf8"});
+          console.log(run.stdout);
+          console.error(run.stderr);
+          process.exit(run.status ?? 1);
+          JS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: desktop-feed-audit
+          path: feed-audit-report.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  approval:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'linbrandon4/totem-releases' && github.actor == 'linbrandon4' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: release-approval
     steps:
-      - name: Record owner approval of exact source and artifacts
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: "24"
+      - name: Verify the published artifacts before approving them
         env:
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           RELEASE_VERSION: ${{ inputs.version }}
           MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+          DISTRIBUTION: ${{ inputs.distribution }}
         run: |
           node --input-type=module <<'JS'
-          import assert from 'node:assert/strict';
-          import {writeFile} from 'node:fs/promises';
-          assert.match(process.env.SOURCE_COMMIT,/^[a-f0-9]{40}$/);
-          assert.match(process.env.MANIFEST_SHA256,/^[a-f0-9]{64}$/);
-          assert.match(process.env.RELEASE_VERSION,/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
-          await writeFile('release-approval.json',JSON.stringify({
-            sourceCommit:process.env.SOURCE_COMMIT,
-            version:process.env.RELEASE_VERSION,
-            manifestSha256:process.env.MANIFEST_SHA256,
-            runId:process.env.GITHUB_RUN_ID,
-            workflowCommit:process.env.GITHUB_SHA,
-            repository:process.env.GITHUB_REPOSITORY,
-          },null,2)+'\n');
+          import assert from "node:assert/strict";
+          import {spawnSync} from "node:child_process";
+          import {createHash} from "node:crypto";
+          import {readFile} from "node:fs/promises";
+
+          assert.match(process.env.SOURCE_COMMIT, /^[a-f0-9]{40}$/);
+          assert.match(process.env.MANIFEST_SHA256, /^[a-f0-9]{64}$/);
+          assert.match(process.env.RELEASE_VERSION, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+
+          const tag = `v${process.env.RELEASE_VERSION}`;
+          const served = await fetch(`https://github.com/linbrandon4/totem-releases/releases/download/${tag}/latest.json`)
+            .then((response) => {
+              assert.equal(response.status, 200, "latest.json must be published for this tag");
+              return response.arrayBuffer();
+            });
+          const servedSha256 = createHash("sha256").update(Buffer.from(served)).digest("hex");
+          assert.equal(servedSha256, process.env.MANIFEST_SHA256, "manifest_sha256 does not match the published latest.json");
+          const manifest = JSON.parse(Buffer.from(served).toString("utf8"));
+          assert.equal(manifest.version, process.env.RELEASE_VERSION, "published version differs from the approved version");
+          assert.equal(manifest.sourceCommit, process.env.SOURCE_COMMIT, "published sourceCommit differs from the approved source");
+
+          const args = ["checks/desktop-release-checks.mjs", "--tag", tag, "--report", "release-verification-run.json"];
+          if (process.env.DISTRIBUTION === "trusted") args.push("--require-trusted");
+          const run = spawnSync(process.execPath, args, {encoding: "utf8"});
+          console.log(run.stdout);
+          console.error(run.stderr);
+          assert.equal(run.status, 0, `artifact verification failed for ${tag}`);
+          JS
+      - name: Record approval bound to verified evidence
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          DISTRIBUTION: ${{ inputs.distribution }}
+        run: |
+          node --input-type=module <<'JS'
+          import assert from "node:assert/strict";
+          import {createHash} from "node:crypto";
+          import {readFile, writeFile} from "node:fs/promises";
+          const report = JSON.parse(await readFile("release-verification-run.json", "utf8"));
+          assert.equal(report.passed, true);
+          assert.equal(report.version, process.env.RELEASE_VERSION);
+          assert.equal(report.sourceCommit, process.env.SOURCE_COMMIT);
+          const artifacts = report.results
+            .filter((result) => result.check.startsWith("artifact "))
+            .map((result) => ({artifact: result.check.slice("artifact ".length), sha256: result.sha256, bytes: result.bytes}));
+          assert.equal(artifacts.length, 2, "both platform artifacts must be verified");
+          const reportSha256 = createHash("sha256").update(JSON.stringify(report)).digest("hex");
+          await writeFile("release-approval.json", JSON.stringify({
+            sourceCommit: process.env.SOURCE_COMMIT,
+            version: process.env.RELEASE_VERSION,
+            distribution: process.env.DISTRIBUTION,
+            trustedDistribution: process.env.DISTRIBUTION === "trusted",
+            artifacts,
+            warnings: report.warnings,
+            reportSha256,
+            runId: process.env.GITHUB_RUN_ID,
+            workflowCommit: process.env.GITHUB_SHA,
+            repository: process.env.GITHUB_REPOSITORY,
+          }, null, 2) + "\n");
           JS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-approval
-          path: release-approval.json
+          path: |
+            release-approval.json
+            release-verification-run.json
           if-no-files-found: error
           retention-days: 14
