@@ -105,8 +105,9 @@ async function withRelease(mutate, assertion) {
   }
 }
 
-async function expectFailure(mutate, message) {
-  await withRelease(mutate, async (result) => {
+async function expectFailure(mutate, message, extra = []) {
+  await withRelease(mutate, async (result, base) => {
+    if (extra.length > 0) result = await run(base, extra);
     assert.equal(result.status, 1, `expected failure, got ${result.status}\n${result.output}`);
     assert.match(result.output, message);
   });
@@ -196,10 +197,34 @@ test("a build receipt from another source commit fails", async () => {
   );
 });
 
+test("a receipt claiming another platform is rejected", async () => {
+  await expectFailure(
+    mutating("mac-build-receipt.json", (receipt) => {
+      receipt.platform = "windows-x86_64";
+    }),
+    /mac-build-receipt\.json does not record platform darwin-aarch64/,
+    ["--require-trusted"],
+  );
+});
+
+test("a receipt that does not bind the served artifact is rejected", async () => {
+  await expectFailure(
+    mutating("mac-build-receipt.json", (receipt) => {
+      receipt.platform = "darwin-aarch64";
+      receipt.checks = ["codesign-verify"];
+      receipt.build = { host: "mac-builder", artifactSha256: "3".repeat(64), signing: { status: "DeveloperID" } };
+    }),
+    /mac-build-receipt\.json build digest does not match the served artifact/,
+    ["--require-trusted"],
+  );
+});
+
 test("an unsigned preview cannot satisfy --require-trusted", async () => {
   await withRelease(null, async (result, base) => {
     const trusted = await run(base, ["--require-trusted"]);
     assert.equal(trusted.status, 1, trusted.output.slice(-2000));
-    assert.match(trusted.output, /trusted distribution macOS: publisher status is AdHoc/);
+    assert.match(trusted.output, /publisher status is AdHoc/);
+    assert.match(trusted.output, /installer has no CompanyName resource/);
+    assert.match(trusted.output, /receipts are identical/);
   });
 });

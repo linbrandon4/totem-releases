@@ -78,6 +78,8 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: "24"
+      - name: Unit-test the installer metadata reader
+        run: node --test checks/pe-metadata.test.mjs
       - name: Verify the published artifacts before approving them
         env:
           SOURCE_COMMIT: ${{ inputs.source_commit }}

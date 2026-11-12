@@ -16,9 +16,11 @@ node --test checks/desktop-release-checks.test.mjs
 ```
 
 `--require-trusted` is the distribution gate: it additionally demands Developer
-ID signing, a notarized macOS build and an Authenticode-signed Windows installer,
-plus per-platform build receipts, and refuses signatures whose trusted comment
-names another file. Without it the command accepts an unsigned preview but prints
+ID signing, a notarized macOS build, an Authenticode-signed Windows installer whose
+version resource carries Company/Product/FileVersion, and per-platform build
+receipts that bind their native build to the served bytes. It refuses signatures
+whose trusted comment names another file, and it lists every blocker in one run.
+The build-side steps are in `docs/desktop-signing-runbook.md`. Without it the command accepts an unsigned preview but prints
 every deviation as a warning.
 
 `--asset-base` points the same checks at a local directory served over HTTP, so a

@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 import { createHash, createPublicKey, verify as cryptoVerify } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { inspectPe, metadataProblems } from "./pe-metadata.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
@@ -208,6 +209,16 @@ try {
     record(`artifact ${name}`, { bytes, sha256: digest, sigAssetMatchesInline: sigAsset !== null });
   }
 
+  const windowsArtifact = files.get("windows-x86_64");
+  const pe = inspectPe(await readFile(windowsArtifact.path));
+  record("windows installer metadata", pe);
+  const metadata = metadataProblems(pe);
+  if (!requireTrusted && metadata.length > 0) {
+    warnings.push(`${windowsArtifact.name}: ${metadata.join("; ")}, so Windows shows an unknown publisher`);
+    console.log(JSON.stringify({ warning: warnings.at(-1) }));
+  }
+
+
   // SHA256SUMS and the per-platform manifests must agree with the served bytes.
   const sumsText = await fetchOk(`${assetBase}/SHA256SUMS`)
     .then((b) => b.toString("utf8"))
@@ -292,6 +303,7 @@ try {
       target,
       platform: receipt.platform ?? null,
       checks: receipt.checks ?? null,
+      build: receipt.build ?? null,
       digest: sha256(Buffer.from(JSON.stringify(receipt))),
     });
     record(receiptName, {
@@ -313,25 +325,82 @@ try {
   if (requireTrusted) {
     const mac = JSON.parse(await fetchOk(`${assetBase}/darwin-aarch64.json`).then((b) => b.toString("utf8")));
     const win = JSON.parse(await fetchOk(`${assetBase}/windows-x86_64.json`).then((b) => b.toString("utf8")));
-    if (mac.publisherSignature?.status !== "DeveloperID") {
-      fail("trusted distribution macOS", `publisher status is ${mac.publisherSignature?.status}`);
+    // Report every gate failure in one run so the owner sees all of the work at
+    // once instead of fixing one blocker per release attempt.
+    const blocked = [];
+    const gate = (check, condition, message) => {
+      if (!condition) blocked.push(`${check}: ${message}`);
+    };
+
+    gate(
+      "trusted distribution macOS",
+      mac.publisherSignature?.status === "DeveloperID",
+      `publisher status is ${mac.publisherSignature?.status}`,
+    );
+    gate("trusted distribution macOS", mac.publisherSignature?.notarized === true, "not notarized");
+    gate(
+      "trusted distribution macOS",
+      /^[A-Z0-9]{10}$/.test(mac.publisherSignature?.teamId ?? ""),
+      "missing Apple team id",
+    );
+    gate(
+      "trusted distribution Windows",
+      win.publisherSignature?.status === "Signed" && Boolean(win.publisherSignature?.publisher),
+      `publisher status is ${win.publisherSignature?.status}`,
+    );
+    for (const problem of metadataProblems(pe)) {
+      gate(`trusted distribution Windows ${windowsArtifact.name}`, false, problem);
     }
-    if (mac.publisherSignature?.notarized !== true) fail("trusted distribution macOS", "not notarized");
-    if (!/^[A-Z0-9]{10}$/.test(mac.publisherSignature?.teamId ?? "")) {
-      fail("trusted distribution macOS", "missing Apple team id");
-    }
-    if (win.publisherSignature?.status !== "Signed" || !win.publisherSignature?.publisher) {
-      fail("trusted distribution Windows", `publisher status is ${win.publisherSignature?.status}`);
-    }
+
+    gate("trusted distribution receipts", receipts.length === 2, "both platforms must publish a build receipt");
+    gate(
+      "trusted distribution receipts",
+      receipts.length === 2 && receipts[0].digest !== receipts[1].digest,
+      "receipts are identical, so neither records a platform build",
+    );
     for (const receipt of receipts) {
-      if (receipt.platform !== receipt.target) {
-        fail("trusted distribution receipts", `${receipt.name} does not record platform ${receipt.target}`);
-      }
-      if (!Array.isArray(receipt.checks) || receipt.checks.length === 0) {
-        fail("trusted distribution receipts", `${receipt.name} records no native build checks`);
-      }
+      const served = files.get(receipt.target);
+      gate(
+        "trusted distribution receipts",
+        receipt.platform === receipt.target,
+        `${receipt.name} does not record platform ${receipt.target}`,
+      );
+      gate(
+        "trusted distribution receipts",
+        Array.isArray(receipt.checks) && receipt.checks.length > 0,
+        `${receipt.name} records no native build checks`,
+      );
+      const build = receipt.build;
+      gate(
+        "trusted distribution receipts",
+        Boolean(build) && typeof build === "object",
+        `${receipt.name} records no native build section`,
+      );
+      if (!build || typeof build !== "object") continue;
+      gate("trusted distribution receipts", Boolean(build.host), `${receipt.name} records no builder host`);
+      gate(
+        "trusted distribution receipts",
+        build.artifactSha256 === served.digest,
+        `${receipt.name} build digest does not match the served artifact`,
+      );
+      const expected = receipt.target === "darwin-aarch64" ? "DeveloperID" : "Signed";
+      gate(
+        "trusted distribution receipts",
+        build.signing?.status === expected,
+        `${receipt.name} signing status is ${build.signing?.status}, expected ${expected}`,
+      );
     }
-    record("trusted distribution gate", { mac: mac.publisherSignature, windows: win.publisherSignature });
+
+    record("trusted distribution gate", {
+      mac: mac.publisherSignature,
+      windows: win.publisherSignature,
+      blocked,
+    });
+    if (blocked.length > 0) {
+      throw new Error(
+        `${tag} cannot be approved as a trusted distribution:\n  - ${blocked.join("\n  - ")}`,
+      );
+    }
   }
 
   const report = {
